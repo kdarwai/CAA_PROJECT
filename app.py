@@ -10,6 +10,10 @@ import sqlite3
 from langchain_groq import ChatGroq
 import os
 from dotenv import load_dotenv
+from langchain_community.utilities import WikipediaAPIWrapper
+from langchain.agents import Tool, initialize_agent
+from langchain.chains import LLMMathChain, LLMChain
+from langchain.prompts import PromptTemplate
 
 load_dotenv()
 
@@ -17,9 +21,11 @@ os.environ['LANGCHAIN_API_KEY'] = os.getenv("LANGSMITH_API_KEY")
 os.environ['LANGCHAIN_TRACING_V2']= os.getenv("LANGSMITH_TRACING")
 os.environ['LANGCHAIN_ENDPOINT']= os.getenv("LANGSMITH_ENDPOINT")
 os.environ['LANGCHAIN_PROJECT']= str(os.getenv("LANGSMITH_PROJECT"))
+api_key= str(os.getenv("GROC_API_KEY"))
 
-st.set_page_config(page_title="LangChain: Chat with SQL DB", page_icon="🦜")
-st.title("🦜 LangChain: Chat with SQL DB")
+
+st.set_page_config(page_title="Multisearch LLM", page_icon="🦜")
+st.title("Multisearch LLM")
 
 LOCALDB="USE_LOCALDB"
 MYSQL="USE_MYSQL"
@@ -36,8 +42,6 @@ if radio_opt.index(selected_opt)==1:
     mysql_db=st.sidebar.text_input("MySQL database")
 else:
     db_uri=LOCALDB
-
-api_key="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"
 
 if not db_uri:
     st.info("Please enter the database information and uri")
@@ -69,12 +73,7 @@ else:
 ## toolkit
 toolkit=SQLDatabaseToolkit(db=db,llm=llm)
 
-agent=create_sql_agent(
-    llm=llm,
-    toolkit=toolkit,
-    verbose=True,
-    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION
-)
+
 
 if "messages" not in st.session_state or st.sidebar.button("Clear message history"):
     st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?"}]
@@ -84,16 +83,90 @@ for msg in st.session_state.messages:
 
 user_query=st.chat_input(placeholder="Ask anything from the database")
 
+genre = st.radio(
+    "Select the respective prompts to filter your results",
+    ["SQL table", "Wikipedia", "Maths problem"],
+    index=0,
+)
+if(genre):
+    st.write(f"Displaying result from {genre}")
+
+## Initializing the tools
+wikipedia_wrapper=WikipediaAPIWrapper()
+wikipedia_tool=Tool(
+    name="Wikipedia",
+    func=wikipedia_wrapper.run,
+    description="A tool for searching the Internet to find the vatious information on the topics mentioned"
+
+)
+wiki_agent=initialize_agent(
+    tools=[wikipedia_tool],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=False,
+    handle_parsing_errors=True
+)
+
+math_chain=LLMMathChain.from_llm(llm=llm)
+calculator=Tool(
+    name="Calculator",
+    func=math_chain.run,
+    description="A tools for answering math related questions. Only input mathematical expression need to bed provided"
+)
+
+prompt="""
+Your a agent tasked for solving users mathemtical question. Logically arrive at the solution and provide a detailed explanation
+and display it point wise for the question below
+Question:{user_query}
+Answer:
+"""
+
+prompt_template=PromptTemplate(
+    input_variables=["user_query"],
+    template=prompt
+)
+
+## Combine all the tools into chain
+chain=LLMChain(llm=llm,prompt=prompt_template)
+
+reasoning_tool=Tool(
+    name="Reasoning tool",
+    func=chain.run,
+    description="A tool for answering logic-based and reasoning questions."
+)
+
+
+math_agent=initialize_agent(
+    tools=[wikipedia_tool,calculator,reasoning_tool],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=False,
+    handle_parsing_errors=True
+)
+
+agent=create_sql_agent(
+    llm=llm,
+    toolkit=toolkit,
+    verbose=True,
+    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION
+)
+
 if user_query:
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    st.chat_message("user").write(user_query)
-
-    with st.chat_message("assistant"):
-        streamlit_callback=StreamlitCallbackHandler(st.container())
-        response=agent.run(user_query,callbacks=[streamlit_callback])
-        st.session_state.messages.append({"role":"assistant","content":response})
-        st.write(response)
-
-        
-
-
+    with st.spinner("Generate response.."):
+        st.session_state.messages.append({"role": "user", "content": user_query})
+        st.chat_message("user").write(user_query)
+  
+        streamlit_callback=StreamlitCallbackHandler(st.container(),expand_new_thoughts=False)
+        if(genre=="SQL table"):
+            response=agent.run(user_query,callbacks=[streamlit_callback])
+        elif(genre=="Wikipedia"):
+            response=wiki_agent.run(user_query,callbacks=[streamlit_callback])
+        else:
+            st.session_state["messages"]=[
+        {"role":"assistant","content":"Hi, I'm a MAth chatbot who can answer all your maths questions"}
+    ]       
+            response=math_agent.run(st.session_state.messages,callbacks=[streamlit_callback]
+                                         )
+        st.session_state.messages.append({'role':'assistant',"content":response})
+        st.write('### Response:')
+        st.success(response)
